@@ -219,7 +219,85 @@ object JsonCodecSpec extends DefaultRunnableSpec {
           case (schema, value) => assertEncodesThenDecodes(schema, value)
         }
       },
-      test("Map of complex keys and values") {
+      testM("of map") {
+        checkM(
+          for {
+            left  <- SchemaGen.anyMapAndValue
+            right <- SchemaGen.anyMapAndValue
+          } yield (
+            Schema
+              .EitherSchema(left._1.asInstanceOf[Schema[Map[Any, Any]]], right._1.asInstanceOf[Schema[Map[Any, Any]]]),
+            Left(left._2)
+          )
+        ) {
+          case (schema, value) =>
+            assertEncodesThenDecodes[Either[Map[Any, Any], Map[Any, Any]]](
+              schema.asInstanceOf[Schema[Either[Map[Any, Any], Map[Any, Any]]]],
+              value.asInstanceOf[Either[Map[Any, Any], Map[Any, Any]]]
+            )
+        }
+      },
+      testM("of set") {
+        checkM(
+          for {
+            left  <- SchemaGen.anySetAndValue
+            right <- SchemaGen.anySetAndValue
+          } yield (
+            Schema
+              .EitherSchema(left._1.asInstanceOf[Schema[Set[Any]]], right._1.asInstanceOf[Schema[Set[Any]]]),
+            Left(left._2)
+          )
+        ) {
+          case (schema, value) =>
+            assertEncodesThenDecodes[Either[Set[Any], Set[Any]]](
+              schema.asInstanceOf[Schema[Either[Set[Any], Set[Any]]]],
+              value.asInstanceOf[Either[Set[Any], Set[Any]]]
+            )
+        }
+      },
+      testM("compatible with left/right") {
+        checkM(
+          for {
+            left  <- SchemaGen.anyPrimitiveAndValue
+            right <- SchemaGen.anyPrimitiveAndValue
+          } yield (
+            Schema.either(left._1, right._1),
+            Schema.left(left._1),
+            Schema.right(right._1),
+            Left(left._2),
+            Right(right._2)
+          )
+        ) {
+          case (eitherSchema, leftSchema, rightSchema, leftValue, rightValue) =>
+            for {
+              a1 <- assertEncodesThenDecodesWithDifferentSchemas[Either[Any, Any], Left[Any, Nothing]](
+                     eitherSchema.asInstanceOf[Schema[Either[Any, Any]]],
+                     leftSchema.asInstanceOf[Schema[Left[Any, Nothing]]],
+                     leftValue.asInstanceOf[Either[Any, Any]],
+                     (x: Either[Any, Any], y: Left[Any, Nothing]) => x == y
+                   )
+              a2 <- assertEncodesThenDecodesWithDifferentSchemas(
+                     eitherSchema.asInstanceOf[Schema[Either[Any, Any]]],
+                     rightSchema.asInstanceOf[Schema[Right[Nothing, Any]]],
+                     rightValue,
+                     (x: Either[Any, Any], y: Right[Nothing, Any]) => x == y
+                   )
+              a3 <- assertEncodesThenDecodesWithDifferentSchemas(
+                     leftSchema.asInstanceOf[Schema[Left[Any, Nothing]]],
+                     eitherSchema.asInstanceOf[Schema[Either[Any, Any]]],
+                     leftValue,
+                     (x: Left[Any, Nothing], y: Either[Any, Any]) => x == y
+                   )
+              a4 <- assertEncodesThenDecodesWithDifferentSchemas(
+                     rightSchema.asInstanceOf[Schema[Right[Nothing, Any]]],
+                     eitherSchema.asInstanceOf[Schema[Either[Any, Any]]],
+                     rightValue,
+                     (x: Right[Nothing, Any], y: Either[Any, Any]) => x == y
+                   )
+            } yield a1 && a2 && a3 && a4
+        }
+      },
+      testM("Map of complex keys and values") {
         assertEncodes(
           Schema.map[Key, Value],
           Map(Key("a", 0) -> Value(0, true), Key("b", 1) -> Value(1, false)),
@@ -453,17 +531,26 @@ object JsonCodecSpec extends DefaultRunnableSpec {
     assertM(result)(equalTo(Chunk(value)))
   }
 
-  private def assertEncodesThenDecodes[A](schema: Schema[A], value: A, print: Boolean = false) = {
-    val result = ZStream
+  private def assertEncodesThenDecodes[A](schema: Schema[A], value: A, print: Boolean = false) =
+    assertEncodesThenDecodesWithDifferentSchemas(schema, schema, value, (x: A, y: A) => x == y, print)
+
+  private def assertEncodesThenDecodesWithDifferentSchemas[A1, A2](
+    encodingSchema: Schema[A1],
+    decodingSchema: Schema[A2],
+    value: A1,
+    compare: (A1, A2) => Boolean,
+    print: Boolean = false
+  ) =
+    ZStream
       .succeed(value)
       .tap(value => printLine(s"Input Value: $value").when(print).ignore)
-      .via(JsonCodec.encoder(schema))
+      .via(JsonCodec.encoder(encodingSchema))
       .runCollect
       .tap(encoded => printLine(s"Encoded: ${new String(encoded.toArray)}").when(print).ignore)
       .flatMap { encoded =>
         ZStream
           .fromChunk(encoded)
-          .via(JsonCodec.decoder(schema))
+          .via(JsonCodec.decoder(decodingSchema))
           .runCollect
           .tapError { err =>
             printLineError(s"Decoding failed for input ${new String(encoded.toArray)}\nError Message: $err")
@@ -471,8 +558,13 @@ object JsonCodecSpec extends DefaultRunnableSpec {
       }
       .tap(decoded => printLine(s"Decoded: $decoded").when(print).ignore)
       .either
-    assertM(result)(isRight(equalTo(Chunk(value))))
-  }
+      .map { result =>
+        assertTrue(
+          result.isRight,
+          result.toOption.get.size == 1,
+          compare(value, result.toOption.get.head)
+        )
+      }
 
   private def flatten[A](value: A): A = value match {
     case Some(None)    => None.asInstanceOf[A]

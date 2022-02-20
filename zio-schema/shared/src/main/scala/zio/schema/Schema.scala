@@ -225,8 +225,15 @@ object Schema extends TupleSchemas with RecordSchemas with EnumSchemas {
   implicit def either[A, B](implicit left: Schema[A], right: Schema[B]): Schema[Either[A, B]] =
     EitherSchema(left, right)
 
-  implicit def left[A, B](implicit schemaA: Schema[A]): Schema[Left[A, Nothing]] =
-    schemaA.transform(Left(_), _.value)
+  implicit def left[A](implicit schemaA: Schema[A]): Schema[Left[A, Nothing]] =
+    either[A, Nothing](schemaA, Schema.fail[Nothing]("no schema for Right"))
+      .transformOrFail[Left[A, Nothing]](
+        {
+          case left @ Left(_) => Right(left)
+          case Right(_)       => Left("cannot encode Right")
+        },
+        left => Right(left)
+      )
 
   implicit def list[A](implicit schemaA: Schema[A]): Schema[List[A]] =
     Schema.Sequence[List[A], A](schemaA, _.toList, Chunk.fromIterable(_), Chunk.empty)
@@ -237,8 +244,15 @@ object Schema extends TupleSchemas with RecordSchemas with EnumSchemas {
   implicit def primitive[A](implicit standardType: StandardType[A]): Schema[A] =
     Primitive(standardType, Chunk.empty)
 
-  implicit def right[A, B](implicit schemaB: Schema[B]): Schema[Right[Nothing, B]] =
-    schemaB.transform(Right(_), _.value)
+  implicit def right[B](implicit schemaB: Schema[B]): Schema[Right[Nothing, B]] =
+    either[Nothing, B](Schema.fail[Nothing]("no schema for Left"), schemaB)
+      .transformOrFail[Right[Nothing, B]](
+        {
+          case right @ Right(_) => Right(right)
+          case Left(_)          => Left("cannot encode Left")
+        },
+        right => Right(right)
+      )
 
   implicit def set[A](implicit element: Schema[A]): Schema[Set[A]] =
     chunk(element).transform(_.toSet, Chunk.fromIterable(_))
@@ -439,7 +453,7 @@ object Schema extends TupleSchemas with RecordSchemas with EnumSchemas {
 
   }
 
-  final case class MapSchema[K, V](ks: Schema[K], vs: Schema[V], override val annotations: Chunk[Any])
+  final case class MapSchema[K, V](ks: Schema[K], vs: Schema[V], override val annotations: Chunk[Any] = Chunk.empty)
       extends Collection[Map[K, V], (K, V)] { self =>
     override type Accessors[Lens[_, _], Prism[_, _], Traversal[_, _]] = Traversal[Map[K, V], (K, V)]
 
@@ -451,6 +465,22 @@ object Schema extends TupleSchemas with RecordSchemas with EnumSchemas {
     override def makeAccessors(b: AccessorBuilder): b.Traversal[Map[K, V], (K, V)] =
       b.makeTraversal(self, ks <*> vs)
   }
+
+  final case class SetSchema[A](as: Schema[A], override val annotations: Chunk[Any] = Chunk.empty)
+      extends Collection[Set[A], A] {
+    self =>
+    override type Accessors[Lens[_, _], Prism[_, _], Traversal[_, _]] = Traversal[Set[A], A]
+
+    override def annotate(annotation: Any): SetSchema[A] =
+      copy(annotations = annotations :+ annotation)
+
+    override def defaultValue: Either[String, Set[A]] =
+      as.defaultValue.map(Set(_))
+
+    override def makeAccessors(b: AccessorBuilder): b.Traversal[Set[A], A] =
+      b.makeTraversal(self, as)
+  }
+
 }
 
 //scalafmt: { maxColumn = 400 }
